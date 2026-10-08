@@ -169,6 +169,16 @@ function solo(){
  begin();
 }
 
+const ICE={iceServers:[
+ {urls:'stun:stun.l.google.com:19302'},
+ {urls:'stun:stun1.l.google.com:19302'},
+ {urls:'stun:global.stun.twilio.com:3478'},
+ {urls:'turn:eu-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},
+ {urls:'turn:us-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},
+ {urls:'turn:staticauth.openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
+ {urls:'turn:staticauth.openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+ {urls:'turns:staticauth.openrelay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'}
+]};
 let peerState=0,peerQ=[];
 function withPeer(fn){
  if(typeof Peer!=='undefined')return fn();
@@ -190,7 +200,7 @@ function create(){
 function create2(){
  say('Создаём комнату...');
  code=Array.from({length:4},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random()*24)]).join('');
- peer=new Peer('cg-'+code);
+ peer=new Peer('cg-'+code,{config:ICE});
  peer.on('open',()=>{
   if(running)return;
   host=true;myId='me';players={};bullets=[];
@@ -202,6 +212,7 @@ function create2(){
   if(e.type==='unavailable-id'){try{peer.destroy()}catch(x){}create2()}
   else toMenu('Ошибка соединения: '+e.type);
  });
+ peer.on('disconnected',()=>{try{peer.reconnect()}catch(e){}});
  peer.on('connection',c=>{
   c.on('data',m=>{
    if(m.t==='j'&&!players[c.peer]){conns[c.peer]=c;addP(c.peer,m.n)}
@@ -218,16 +229,24 @@ function join(){
 }
 
 function join2(c){
- say('Подключаемся...');
- peer=new Peer();
+ say('Подключаемся к комнате...');
+ peer=new Peer(undefined,{config:ICE});
  peer.on('error',e=>{
   if(running)return;
-  toMenu(e.type==='peer-unavailable'?'Комната не найдена':'Ошибка соединения: '+e.type);
+  toMenu(e.type==='peer-unavailable'?'Комната не найдена. Проверь код и что хост в игре.':'Ошибка соединения: '+e.type);
  });
  peer.on('open',id=>{
   myId=id;
-  conn=peer.connect('cg-'+c,{serialization:'json'});
-  const to=setTimeout(()=>{if(!running)toMenu('Не удалось подключиться к комнате')},10000);
+  conn=peer.connect('cg-'+c,{serialization:'json',reliable:true});
+  const to=setTimeout(()=>{
+   if(!running)toMenu('Не удалось установить прямое соединение. Попробуй другую сеть (например, одну Wi-Fi или раздачу с телефона).');
+  },25000);
+  conn.on('iceStateChanged',s=>{
+   if(running)return;
+   if(s==='failed'){clearTimeout(to);toMenu('Соединение заблокировано сетью. Попробуй другую сеть или Wi-Fi.')}
+   else say('Подключаемся к комнате... ('+s+')');
+  });
+  conn.on('error',()=>{if(!running){clearTimeout(to);toMenu('Ошибка соединения с комнатой')}});
   conn.on('open',()=>{
    clearTimeout(to);
    host=false;code=c;snap=null;sm={};
