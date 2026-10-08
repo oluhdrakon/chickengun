@@ -45,7 +45,7 @@ const $=id=>document.getElementById(id);
 const MW=1600,MH=1000,R=16;
 const walls=[[300,200,40,240],[1260,560,40,240],[700,450,200,100],[300,760,260,40],[1040,200,260,40],[100,480,120,40],[1380,480,120,40],[760,120,80,40],[760,840,80,40]];
 const cols=['#ffffff','#ffe9a8','#ffc9a0','#d9ecff','#e6d4ff','#c8f5c8','#ffd1e8','#f2f2d0'];
-let W=0,H=0,z=1,dpr=1,host=false,mq=null,upT='',downT='',seen={},lastDown=0,myId='',players={},bullets=[],feed=[],snap=null,sm={},code='',running=false,touch=false,last=0,camX=0,camY=0;
+let W=0,H=0,z=1,dpr=1,host=false,mq=null,upT='',downT='',seen={},lastDown=0,sbuf=[],meta={},pred=null,mePos=null,lastMsg='',lastSend=0,lastMeta=0,myId='',players={},bullets=[],feed=[],snap=null,sm={},code='',running=false,touch=false,last=0,camX=0,camY=0;
 const keys={},mouse={x:0,y:0,d:false},st={L:null,R:null};
 const inp={mx:0,my:0,a:0,f:0};
 
@@ -148,6 +148,21 @@ function snapshot(){
  };
 }
 
+function pack(){
+ return{
+  p:Object.values(players).map(p=>[p.id,Math.round(p.x),Math.round(p.y),+p.a.toFixed(2),p.hp,p.k,p.d,p.dead?1:0,+p.rt.toFixed(1)]),
+  b:bullets.map(b=>[Math.round(b.x),Math.round(b.y),Math.round(b.vx),Math.round(b.vy)]),
+  f:feed.map(f=>f.s)
+ };
+}
+
+function sendMeta(){
+ if(!mq||!mq.connected)return;
+ const o={};
+ for(const p of Object.values(players))o[p.id]=[p.name,p.col];
+ mq.publish(downT,JSON.stringify({mt:o}));
+}
+
 function say(t){$('st').textContent=t}
 function nick(){return $('nm').value.trim()||'Курица'}
 function begin(){
@@ -165,7 +180,7 @@ function toMenu(t){
    mq.end();
   }catch(e){}
  }
- mq=null;players={};bullets=[];feed=[];snap=null;sm={};code='';seen={};
+ mq=null;players={};bullets=[];feed=[];snap=null;sm={};code='';seen={};sbuf=[];meta={};pred=null;mePos=null;
 }
 
 function solo(){
@@ -227,7 +242,7 @@ function create2(){
    if(!m||!m.id||m.id==='me')return;
    const now=performance.now();
    if(m.t==='j'){
-    if(!players[m.id]&&Object.keys(players).length<8)addP(m.id,m.n);
+    if(!players[m.id]&&Object.keys(players).length<8){addP(m.id,m.n);sendMeta()}
     if(players[m.id])seen[m.id]=now;
    }else if(m.t==='i'&&players[m.id]){
     seen[m.id]=now;
@@ -252,6 +267,7 @@ function join(){
 }
 
 function join2(c){
+ sbuf=[];meta={};pred=null;
  openBroker(cl=>{
   mq=cl;myId='c'+Math.random().toString(36).slice(2,9);
   upT=PFX+c+'/up';downT=PFX+c+'/down';
@@ -265,9 +281,14 @@ function join2(c){
    try{m=JSON.parse(buf.toString())}catch(e){return}
    if(!m)return;
    if(m.bye){if(running)toMenu('Хост закрыл комнату');return}
-   if(!m.p||!m.p.some(p=>p.i===myId))return;
-   lastDown=performance.now();
-   m.rt=lastDown;snap=m;
+   if(m.mt){for(const k in m.mt)meta[k]=m.mt[k];return}
+   if(!m.p||!m.p.some(a=>a[0]===myId))return;
+   const now=performance.now();
+   lastDown=now;
+   const o={p:m.p.map(a=>{const mt=meta[a[0]]||['...','#ffffff'];return{i:a[0],x:a[1],y:a[2],a:a[3],h:a[4],k:a[5],d:a[6],e:a[7],r:a[8],n:mt[0],c:mt[1]}}),b:m.b||[],f:m.f||[],rt:now};
+   snap=o;
+   sbuf.push({t:now,s:o});
+   if(sbuf.length>30)sbuf.shift();
    if(!joined){
     joined=true;clearTimeout(to);clearInterval(jt);
     host=false;code=c;sm={};
@@ -284,16 +305,63 @@ function join2(c){
 }
 
 setInterval(()=>{
- if(!running||!mq)return;
+ if(!running||!mq||!host)return;
  const now=performance.now();
- if(host){
-  for(const k in seen)if(now-seen[k]>6000){delete seen[k];delete players[k]}
-  if(mq.connected&&Object.keys(seen).length)mq.publish(downT,JSON.stringify(snapshot()));
- }else{
-  if(mq.connected)mq.publish(upT,JSON.stringify({t:'i',id:myId,mx:+inp.mx.toFixed(2),my:+inp.my.toFixed(2),a:+inp.a.toFixed(2),f:inp.f}));
-  if(now-lastDown>6000)toMenu('Связь с хостом потеряна');
+ for(const k in seen)if(now-seen[k]>6000){delete seen[k];delete players[k]}
+ if(now-lastMeta>1000){lastMeta=now;sendMeta()}
+ if(mq.connected&&Object.keys(seen).length)mq.publish(downT,JSON.stringify(pack()));
+},40);
+
+setInterval(()=>{
+ if(!running||!mq||host)return;
+ const now=performance.now();
+ if(mq.connected){
+  const msg=JSON.stringify({t:'i',id:myId,mx:+inp.mx.toFixed(2),my:+inp.my.toFixed(2),a:+inp.a.toFixed(2),f:inp.f});
+  if(msg!==lastMsg||now-lastSend>250){lastMsg=msg;lastSend=now;mq.publish(upT,msg)}
  }
-},50);
+ if(now-lastDown>6000)toMenu('Связь с хостом потеряна');
+},33);
+
+function predict(dt){
+ if(!snap)return;
+ const me=snap.p.find(p=>p.i===myId);
+ if(!me)return;
+ if(!pred||me.e||Math.hypot(me.x-pred.x,me.y-pred.y)>300)pred={x:me.x,y:me.y};
+ if(me.e)return;
+ let{mx,my}=inp;
+ const l=Math.hypot(mx,my);
+ if(l>1){mx/=l;my/=l}
+ const nx=pred.x+mx*230*dt,ny=pred.y+my*230*dt;
+ if(!hitW(nx,pred.y,R)&&nx>R&&nx<MW-R)pred.x=nx;
+ if(!hitW(pred.x,ny,R)&&ny>R&&ny<MH-R)pred.y=ny;
+ const e=Math.hypot(me.x-pred.x,me.y-pred.y);
+ if(l<.05){
+  const c=Math.min(1,dt*6);
+  pred.x+=(me.x-pred.x)*c;pred.y+=(me.y-pred.y)*c;
+ }else if(e>140){
+  const c=Math.min(1,dt*2);
+  pred.x+=(me.x-pred.x)*c;pred.y+=(me.y-pred.y)*c;
+ }
+}
+
+function interp(now){
+ const rt=now-100;
+ let a=sbuf[0],b=null;
+ for(let i=sbuf.length-1;i>=0;i--){
+  if(sbuf[i].t<=rt){a=sbuf[i];b=sbuf[i+1]||null;break}
+ }
+ const f=b?Math.min(1,Math.max(0,(rt-a.t)/(b.t-a.t))):0;
+ const bm={};
+ if(b)for(const p of b.s.p)bm[p.i]=p;
+ const ps=a.s.p.map(p=>{
+  const q=bm[p.i];
+  if(!q||p.e||q.e||Math.hypot(q.x-p.x,q.y-p.y)>150)return{...p};
+  let da=q.a-p.a;
+  da=Math.atan2(Math.sin(da),Math.cos(da));
+  return{...p,x:p.x+(q.x-p.x)*f,y:p.y+(q.y-p.y)*f,a:p.a+da*f};
+ });
+ return{p:ps,b:a.s.b,off:Math.max(0,Math.min(.2,(rt-a.t)/1000))};
+}
 
 function readIn(me){
  let mx=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0);
@@ -408,14 +476,13 @@ function hud(){
 
 function draw(dt){
  g.setTransform(dpr,0,0,dpr,0,0);
- const k=host?1:Math.min(1,dt*14);
- for(const p of snap.p){
-  let s=sm[p.i];
-  if(!s||Math.hypot(p.x-s.x,p.y-s.y)>150)s=sm[p.i]={x:p.x,y:p.y,a:p.a};
-  s.x+=(p.x-s.x)*k;s.y+=(p.y-s.y)*k;
-  let da=p.a-s.a;da=Math.atan2(Math.sin(da),Math.cos(da));s.a+=da*k;
- }
- const me=sm[myId],vw=W/z,vh=H/z;
+ let ps,bl,off=0;
+ if(host){ps=snap.p;bl=snap.b}
+ else{const v=interp(performance.now());ps=v.p;bl=v.b;off=v.off}
+ const me=ps.find(p=>p.i===myId);
+ if(!host&&me&&pred&&!me.e){me.x=pred.x;me.y=pred.y;me.a=inp.a}
+ mePos=me?{x:me.x,y:me.y}:null;
+ const vw=W/z,vh=H/z;
  if(me){
   camX=vw>=MW?(MW-vw)/2:Math.max(0,Math.min(MW-vw,me.x-vw/2));
   camY=vh>=MH?(MH-vh)/2:Math.max(0,Math.min(MH-vh,me.y-vh/2));
@@ -432,12 +499,11 @@ function draw(dt){
   g.fillStyle='#b9833f';g.fillRect(w[0],w[1],w[2],w[3]);
   g.strokeStyle='#6e4a1e';g.lineWidth=4;g.strokeRect(w[0]+2,w[1]+2,w[2]-4,w[3]-4);
  }
- const off=Math.min(.1,(performance.now()-(snap.rt||performance.now()))/1000);
  g.fillStyle='#ffd23a';g.strokeStyle='#8a5a00';g.lineWidth=1.5;
- for(const b of snap.b){
+ for(const b of bl){
   g.beginPath();g.arc(b[0]+b[2]*off,b[1]+b[3]*off,5,0,7);g.fill();g.stroke();
  }
- for(const p of snap.p){if(!p.e)chicken(p,sm[p.i])}
+ for(const p of ps){if(!p.e)chicken(p,p)}
  g.restore();
  hud();
 }
@@ -446,12 +512,12 @@ function frame(t){
  requestAnimationFrame(frame);
  const dt=Math.min(.05,(t-last)/1000);last=t;
  if(!running)return;
- readIn(sm[myId]);
+ readIn(mePos);
  if(host){
   const p=players[myId];
   if(p)p.in={mx:inp.mx,my:inp.my,a:inp.a,f:inp.f};
   step(dt);snap=snapshot();snap.rt=performance.now();
- }
+ }else predict(dt);
  if(snap)draw(dt);
 }
 
