@@ -45,7 +45,7 @@ const $=id=>document.getElementById(id);
 const MW=1600,MH=1000,R=16;
 const walls=[[300,200,40,240],[1260,560,40,240],[700,450,200,100],[300,760,260,40],[1040,200,260,40],[100,480,120,40],[1380,480,120,40],[760,120,80,40],[760,840,80,40]];
 const cols=['#ffffff','#ffe9a8','#ffc9a0','#d9ecff','#e6d4ff','#c8f5c8','#ffd1e8','#f2f2d0'];
-let W=0,H=0,z=1,dpr=1,host=false,peer=null,conn=null,conns={},myId='',players={},bullets=[],feed=[],snap=null,sm={},code='',running=false,touch=false,last=0,camX=0,camY=0;
+let W=0,H=0,z=1,dpr=1,host=false,mq=null,upT='',downT='',seen={},lastDown=0,myId='',players={},bullets=[],feed=[],snap=null,sm={},code='',running=false,touch=false,last=0,camX=0,camY=0;
 const keys={},mouse={x:0,y:0,d:false},st={L:null,R:null};
 const inp={mx:0,my:0,a:0,f:0};
 
@@ -152,14 +152,20 @@ function say(t){$('st').textContent=t}
 function nick(){return $('nm').value.trim()||'Курица'}
 function begin(){
  $('m').style.display='none';$('ex').style.display='block';
- running=true;last=performance.now();
+ running=true;last=performance.now();lastDown=last;
 }
 function toMenu(t){
+ const was=running;
  running=false;
  $('m').style.display='flex';$('ex').style.display='none';
  say(t||'');
- if(peer){try{peer.destroy()}catch(e){}}
- peer=null;conn=null;conns={};players={};bullets=[];feed=[];snap=null;sm={};code='';
+ if(mq){
+  try{
+   if(was&&mq.connected)mq.publish(host?downT:upT,JSON.stringify(host?{bye:1}:{t:'l',id:myId}));
+   mq.end();
+  }catch(e){}
+ }
+ mq=null;players={};bullets=[];feed=[];snap=null;sm={};code='';seen={};
 }
 
 function solo(){
@@ -169,104 +175,125 @@ function solo(){
  begin();
 }
 
-const ICE={iceServers:[
- {urls:'stun:stun.l.google.com:19302'},
- {urls:'stun:stun1.l.google.com:19302'},
- {urls:'stun:global.stun.twilio.com:3478'},
- {urls:'turn:eu-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},
- {urls:'turn:us-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},
- {urls:'turn:staticauth.openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
- {urls:'turn:staticauth.openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
- {urls:'turns:staticauth.openrelay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'}
-]};
-let peerState=0,peerQ=[];
-function withPeer(fn){
- if(typeof Peer!=='undefined')return fn();
+const BROKERS=['wss://broker.emqx.io:8084/mqtt','wss://broker.hivemq.com:8884/mqtt','wss://test.mosquitto.org:8081'];
+const PFX='chickengun-x7k2/';
+let libState=0,libQ=[];
+
+function withLib(fn){
+ if(typeof mqtt!=='undefined')return fn();
  say('Загружаем сетевой модуль...');
- peerQ.push(fn);
- if(peerState)return;
- peerState=1;
+ libQ.push(fn);
+ if(libState)return;
+ libState=1;
  const sc=document.createElement('script');
- sc.src='https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js';
- sc.onload=()=>{peerState=0;const q=peerQ;peerQ=[];q.forEach(f=>f())};
- sc.onerror=()=>{peerState=0;peerQ=[];say('Не удалось загрузить PeerJS. Проверь интернет.')};
+ sc.src='https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js';
+ sc.onload=()=>{libState=0;const q=libQ;libQ=[];q.forEach(f=>f())};
+ sc.onerror=()=>{libState=0;libQ=[];say('Не удалось загрузить сетевой модуль. Проверь интернет или отключи блокировщик.')};
  document.head.appendChild(sc);
 }
 
-function create(){
- withPeer(create2);
+function openBroker(ok,fail){
+ let i=0;
+ const next=()=>{
+  if(i>=BROKERS.length)return fail();
+  const url=BROKERS[i++];
+  say('Подключаемся к серверу '+i+' из '+BROKERS.length+'...');
+  const c=mqtt.connect(url,{clientId:'cg'+Math.random().toString(16).slice(2,10),connectTimeout:6000,reconnectPeriod:0,clean:true});
+  let done=false;
+  const bad=()=>{if(done)return;done=true;try{c.end(true)}catch(e){}next()};
+  c.once('connect',()=>{
+   if(done)return;
+   done=true;
+   c.options.reconnectPeriod=2000;
+   c.on('error',()=>{});
+   ok(c);
+  });
+  c.on('error',bad);
+  c.once('close',bad);
+  setTimeout(bad,7000);
+ };
+ next();
 }
 
+function create(){withLib(create2)}
+
 function create2(){
- say('Создаём комнату...');
  code=Array.from({length:4},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random()*24)]).join('');
- peer=new Peer('cg-'+code,{config:ICE});
- peer.on('open',()=>{
-  if(running)return;
-  host=true;myId='me';players={};bullets=[];
-  addP('me',nick());
-  begin();
- });
- peer.on('error',e=>{
-  if(running)return;
-  if(e.type==='unavailable-id'){try{peer.destroy()}catch(x){}create2()}
-  else toMenu('Ошибка соединения: '+e.type);
- });
- peer.on('disconnected',()=>{try{peer.reconnect()}catch(e){}});
- peer.on('connection',c=>{
-  c.on('data',m=>{
-   if(m.t==='j'&&!players[c.peer]){conns[c.peer]=c;addP(c.peer,m.n)}
-   else if(m.t==='i'&&players[c.peer])players[c.peer].in={mx:+m.mx||0,my:+m.my||0,a:+m.a||0,f:m.f?1:0};
+ openBroker(c=>{
+  mq=c;upT=PFX+code+'/up';downT=PFX+code+'/down';
+  mq.on('message',(tp,buf)=>{
+   let m;
+   try{m=JSON.parse(buf.toString())}catch(e){return}
+   if(!m||!m.id||m.id==='me')return;
+   const now=performance.now();
+   if(m.t==='j'){
+    if(!players[m.id]&&Object.keys(players).length<8)addP(m.id,m.n);
+    if(players[m.id])seen[m.id]=now;
+   }else if(m.t==='i'&&players[m.id]){
+    seen[m.id]=now;
+    players[m.id].in={mx:+m.mx||0,my:+m.my||0,a:+m.a||0,f:m.f?1:0};
+   }else if(m.t==='l'&&players[m.id]){
+    delete players[m.id];delete seen[m.id];
+   }
   });
-  c.on('close',()=>{delete conns[c.peer];delete players[c.peer]});
- });
+  mq.subscribe(upT,err=>{
+   if(err)return toMenu('Не удалось создать комнату');
+   host=true;myId='me';players={};bullets=[];seen={};
+   addP('me',nick());
+   begin();
+  });
+ },()=>toMenu('Не удалось подключиться ни к одному серверу. Отключи VPN или блокировщик и попробуй снова.'));
 }
 
 function join(){
  const c=$('cd').value.trim().toUpperCase();
  if(c.length!==4)return say('Введи код комнаты из 4 букв');
- withPeer(()=>join2(c));
+ withLib(()=>join2(c));
 }
 
 function join2(c){
- say('Подключаемся к комнате...');
- peer=new Peer(undefined,{config:ICE});
- peer.on('error',e=>{
-  if(running)return;
-  toMenu(e.type==='peer-unavailable'?'Комната не найдена. Проверь код и что хост в игре.':'Ошибка соединения: '+e.type);
- });
- peer.on('open',id=>{
-  myId=id;
-  conn=peer.connect('cg-'+c,{serialization:'json',reliable:true});
+ openBroker(cl=>{
+  mq=cl;myId='c'+Math.random().toString(36).slice(2,9);
+  upT=PFX+c+'/up';downT=PFX+c+'/down';
+  let joined=false,jt=null;
   const to=setTimeout(()=>{
-   if(!running)toMenu('Не удалось установить прямое соединение. Попробуй другую сеть (например, одну Wi-Fi или раздачу с телефона).');
-  },25000);
-  conn.on('iceStateChanged',s=>{
-   if(running)return;
-   if(s==='failed'){clearTimeout(to);toMenu('Соединение заблокировано сетью. Попробуй другую сеть или Wi-Fi.')}
-   else say('Подключаемся к комнате... ('+s+')');
+   clearInterval(jt);
+   if(!joined)toMenu('Комната не найдена, заполнена или хост не в сети. Проверь код.');
+  },10000);
+  mq.on('message',(tp,buf)=>{
+   let m;
+   try{m=JSON.parse(buf.toString())}catch(e){return}
+   if(!m)return;
+   if(m.bye){if(running)toMenu('Хост закрыл комнату');return}
+   if(!m.p||!m.p.some(p=>p.i===myId))return;
+   lastDown=performance.now();
+   m.rt=lastDown;snap=m;
+   if(!joined){
+    joined=true;clearTimeout(to);clearInterval(jt);
+    host=false;code=c;sm={};
+    begin();
+   }
   });
-  conn.on('error',()=>{if(!running){clearTimeout(to);toMenu('Ошибка соединения с комнатой')}});
-  conn.on('open',()=>{
-   clearTimeout(to);
-   host=false;code=c;snap=null;sm={};
-   conn.send({t:'j',n:nick()});
-   begin();
+  mq.subscribe(downT,err=>{
+   if(err){clearTimeout(to);return toMenu('Ошибка подключения к комнате')}
+   const sendJ=()=>mq.publish(upT,JSON.stringify({t:'j',id:myId,n:nick()}));
+   sendJ();
+   jt=setInterval(sendJ,1000);
   });
-  conn.on('data',m=>{m.rt=performance.now();snap=m});
-  conn.on('close',()=>{if(running)toMenu('Хост закрыл комнату')});
- });
+ },()=>toMenu('Не удалось подключиться ни к одному серверу. Отключи VPN или блокировщик и попробуй снова.'));
 }
 
 setInterval(()=>{
- if(!running)return;
+ if(!running||!mq)return;
+ const now=performance.now();
  if(host){
-  const s=snapshot();
-  for(const k in conns)if(conns[k].open)conns[k].send(s);
- }else if(conn&&conn.open){
-  conn.send({t:'i',mx:+inp.mx.toFixed(2),my:+inp.my.toFixed(2),a:+inp.a.toFixed(2),f:inp.f});
+  for(const k in seen)if(now-seen[k]>6000){delete seen[k];delete players[k]}
+  if(mq.connected&&Object.keys(seen).length)mq.publish(downT,JSON.stringify(snapshot()));
+ }else{
+  if(mq.connected)mq.publish(upT,JSON.stringify({t:'i',id:myId,mx:+inp.mx.toFixed(2),my:+inp.my.toFixed(2),a:+inp.a.toFixed(2),f:inp.f}));
+  if(now-lastDown>6000)toMenu('Связь с хостом потеряна');
  }
-},45);
+},50);
 
 function readIn(me){
  let mx=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0);
